@@ -17,33 +17,44 @@ import (
 
 // NetworkConfig is the configuration struct for the different environments
 type NetworkConfig struct {
-	L1Config                    etherman.L1Config `json:"l1Config"`
-	L2GlobalExitRootManagerAddr common.Address
-	L2BridgeAddr                common.Address
-	Genesis                     state.Genesis
-	MaxCumulativeGasUsed        uint64
+	// L1: Configuration related to L1
+	L1Config etherman.L1Config `json:"l1Config"`
+	// L1: Genesis of the rollup, first block number and root
+	Genesis state.Genesis
 }
 
 type network string
 
 const mainnet network = "mainnet"
 const testnet network = "testnet"
+const cardona network = "cardona"
 const custom network = "custom"
 
-type genesisFromJSON struct {
-	Root            string                   `json:"root"`
-	GenesisBlockNum uint64                   `json:"genesisBlockNumber"`
-	Genesis         []genesisAccountFromJSON `json:"genesis"`
-	L1Config        etherman.L1Config
+// GenesisFromJSON is the config file for network_custom
+type GenesisFromJSON struct {
+	// L1: root hash of the genesis block
+	Root string `json:"root"`
+	// L1: block number of the genesis block
+	GenesisBlockNum uint64 `json:"genesisBlockNumber"`
+	// L2:  List of states contracts used to populate merkle tree at initial state
+	Genesis []genesisAccountFromJSON `json:"genesis"`
+	// L1: configuration of the network
+	L1Config etherman.L1Config
 }
 
 type genesisAccountFromJSON struct {
-	Balance      string            `json:"balance"`
-	Nonce        string            `json:"nonce"`
-	Address      string            `json:"address"`
-	Bytecode     string            `json:"bytecode"`
-	Storage      map[string]string `json:"storage"`
-	ContractName string            `json:"contractName"`
+	// Address of the account
+	Balance string `json:"balance"`
+	// Nonce of the account
+	Nonce string `json:"nonce"`
+	// Address of the contract
+	Address string `json:"address"`
+	// Byte code of the contract
+	Bytecode string `json:"bytecode"`
+	// Initial storage of the contract
+	Storage map[string]string `json:"storage"`
+	// Name of the contract in L1 (e.g. "PolygonZkEVMDeployer", "PolygonZkEVMBridge",...)
+	ContractName string `json:"contractName"`
 }
 
 func (cfg *Config) loadNetworkConfig(ctx *cli.Context) {
@@ -53,24 +64,27 @@ func (cfg *Config) loadNetworkConfig(ctx *cli.Context) {
 		networkJSON = MainnetNetworkConfigJSON
 	case string(testnet):
 		networkJSON = TestnetNetworkConfigJSON
+	case string(cardona):
+		networkJSON = CardonaNetworkConfigJSON
 	case string(custom):
 		var err error
-		networkJSON, err = loadGenesisFileAsString(ctx)
+		cfgPath := ctx.String(FlagCustomNetwork)
+		networkJSON, err = LoadGenesisFileAsString(cfgPath)
 		if err != nil {
 			panic(err.Error())
 		}
 	default:
-		log.Fatalf("unsupported --network value. Must be one of: [%s, %s, %s]", mainnet, testnet, custom)
+		log.Fatalf("unsupported --network value. Must be one of: [%s, %s, %s]", mainnet, testnet, cardona, custom)
 	}
-	config, err := loadGenesisFromJSONString(networkJSON)
+	config, err := LoadGenesisFromJSONString(networkJSON)
 	if err != nil {
 		panic(fmt.Errorf("failed to load genesis configuration from file. Error: %v", err))
 	}
 	cfg.NetworkConfig = config
 }
 
-func loadGenesisFileAsString(ctx *cli.Context) (string, error) {
-	cfgPath := ctx.String(FlagCustomNetwork)
+// LoadGenesisFileAsString loads the genesis file as a string
+func LoadGenesisFileAsString(cfgPath string) (string, error) {
 	if cfgPath != "" {
 		f, err := os.Open(cfgPath) //nolint:gosec
 		if err != nil {
@@ -93,10 +107,11 @@ func loadGenesisFileAsString(ctx *cli.Context) (string, error) {
 	}
 }
 
-func loadGenesisFromJSONString(jsonStr string) (NetworkConfig, error) {
+// LoadGenesisFromJSONString loads the genesis file from JSON string
+func LoadGenesisFromJSONString(jsonStr string) (NetworkConfig, error) {
 	var cfg NetworkConfig
 
-	var cfgJSON genesisFromJSON
+	var cfgJSON GenesisFromJSON
 	if err := json.Unmarshal([]byte(jsonStr), &cfgJSON); err != nil {
 		return NetworkConfig{}, err
 	}
@@ -107,28 +122,19 @@ func loadGenesisFromJSONString(jsonStr string) (NetworkConfig, error) {
 
 	cfg.L1Config = cfgJSON.L1Config
 	cfg.Genesis = state.Genesis{
-		GenesisBlockNum: cfgJSON.GenesisBlockNum,
-		Root:            common.HexToHash(cfgJSON.Root),
-		GenesisActions:  []*state.GenesisAction{},
+		BlockNumber: cfgJSON.GenesisBlockNum,
+		Root:        common.HexToHash(cfgJSON.Root),
+		Actions:     []*state.GenesisAction{},
 	}
 
-	const l2GlobalExitRootManagerSCName = "PolygonZkEVMGlobalExitRootL2 proxy"
-	const l2BridgeSCName = "PolygonZkEVMBridge proxy"
-
 	for _, account := range cfgJSON.Genesis {
-		if account.ContractName == l2GlobalExitRootManagerSCName {
-			cfg.L2GlobalExitRootManagerAddr = common.HexToAddress(account.Address)
-		}
-		if account.ContractName == l2BridgeSCName {
-			cfg.L2BridgeAddr = common.HexToAddress(account.Address)
-		}
 		if account.Balance != "" && account.Balance != "0" {
 			action := &state.GenesisAction{
 				Address: account.Address,
 				Type:    int(merkletree.LeafTypeBalance),
 				Value:   account.Balance,
 			}
-			cfg.Genesis.GenesisActions = append(cfg.Genesis.GenesisActions, action)
+			cfg.Genesis.Actions = append(cfg.Genesis.Actions, action)
 		}
 		if account.Nonce != "" && account.Nonce != "0" {
 			action := &state.GenesisAction{
@@ -136,7 +142,7 @@ func loadGenesisFromJSONString(jsonStr string) (NetworkConfig, error) {
 				Type:    int(merkletree.LeafTypeNonce),
 				Value:   account.Nonce,
 			}
-			cfg.Genesis.GenesisActions = append(cfg.Genesis.GenesisActions, action)
+			cfg.Genesis.Actions = append(cfg.Genesis.Actions, action)
 		}
 		if account.Bytecode != "" {
 			action := &state.GenesisAction{
@@ -144,7 +150,7 @@ func loadGenesisFromJSONString(jsonStr string) (NetworkConfig, error) {
 				Type:     int(merkletree.LeafTypeCode),
 				Bytecode: account.Bytecode,
 			}
-			cfg.Genesis.GenesisActions = append(cfg.Genesis.GenesisActions, action)
+			cfg.Genesis.Actions = append(cfg.Genesis.Actions, action)
 		}
 		if len(account.Storage) > 0 {
 			for storageKey, storageValue := range account.Storage {
@@ -154,7 +160,7 @@ func loadGenesisFromJSONString(jsonStr string) (NetworkConfig, error) {
 					StoragePosition: storageKey,
 					Value:           storageValue,
 				}
-				cfg.Genesis.GenesisActions = append(cfg.Genesis.GenesisActions, action)
+				cfg.Genesis.Actions = append(cfg.Genesis.Actions, action)
 			}
 		}
 	}

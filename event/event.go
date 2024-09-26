@@ -36,7 +36,22 @@ const (
 	EventID_FinalizerRestart EventID = "FINALIZER RESTART"
 	// EventID_FinalizerBreakEvenGasPriceBigDifference is triggered when the finalizer recalculates the break even gas price and detects a big difference
 	EventID_FinalizerBreakEvenGasPriceBigDifference EventID = "FINALIZER BREAK EVEN GAS PRICE BIG DIFFERENCE"
-
+	// EventID_SynchronizerRestart is triggered when the Synchonizer restarts
+	EventID_SynchronizerRestart EventID = "SYNCHRONIZER RESTART"
+	// EventID_SynchronizerHalt is triggered when the synchronizer halts
+	EventID_SynchronizerHalt EventID = "SYNCHRONIZER HALT"
+	// EventID_SequenceSenderHalt is triggered when the SequenceSender halts
+	EventID_SequenceSenderHalt EventID = "SEQUENCESENDER HALT"
+	// EventID_NodeOOC is triggered when an OOC at node level is detected
+	EventID_NodeOOC EventID = "NODE OOC"
+	// EventID_UsedZKCountersOverflow is triggered when used ZK counters exceeds remaining batch ZK counters
+	EventID_UsedZKCountersOverflow EventID = "USED ZKCOUNTERS OVERFLOW"
+	// EventID_ReservedZKCountersOverflow is triggered when reserved ZK counters exceeds remaining batch ZK counters
+	EventID_ReservedZKCountersOverflow EventID = "RESERVED ZKCOUNTERS OVERFLOW"
+	// EventID_InvalidInfoRoot is triggered when an invalid l1InfoRoot was synced
+	EventID_InvalidInfoRoot EventID = "INVALID INFOROOT"
+	// EventID_L2BlockReorg is triggered when a L2 block reorg has happened in the sequencer
+	EventID_L2BlockReorg EventID = "L2 BLOCK REORG"
 	// Source_Node is the source of the event
 	Source_Node Source = "node"
 

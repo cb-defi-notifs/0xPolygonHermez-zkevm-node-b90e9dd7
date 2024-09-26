@@ -1,6 +1,27 @@
 package state
 
-import "github.com/0xPolygonHermez/zkevm-node/log"
+import (
+	"context"
+
+	"github.com/jackc/pgx/v4"
+)
+
+const (
+	// FORKID_BLUEBERRY is the fork id 4
+	FORKID_BLUEBERRY = 4
+	// FORKID_DRAGONFRUIT is the fork id 5
+	FORKID_DRAGONFRUIT = 5
+	// FORKID_INCABERRY is the fork id 6
+	FORKID_INCABERRY = 6
+	// FORKID_ETROG is the fork id 7
+	FORKID_ETROG = 7
+	// FORKID_ELDERBERRY is the fork id 8
+	FORKID_ELDERBERRY = 8
+	// FORKID_ELDERBERRY_2 is the fork id 9
+	FORKID_ELDERBERRY_2 = 9
+	// FORKID_FEIJOA is the fork id 10
+	FORKID_FEIJOA = 10
+)
 
 // ForkIDInterval is a fork id interval
 type ForkIDInterval struct {
@@ -8,30 +29,25 @@ type ForkIDInterval struct {
 	ToBatchNumber   uint64
 	ForkId          uint64
 	Version         string
+	BlockNumber     uint64
 }
 
-// UpdateForkIDIntervals updates the forkID intervals
-func (s *State) UpdateForkIDIntervals(intervals []ForkIDInterval) {
-	log.Infof("Updating forkIDs. Setting %d forkIDs", len(intervals))
-	log.Infof("intervals: %#v", intervals)
-	s.cfg.ForkIDIntervals = intervals
+// UpdateForkIDIntervalsInMemory updates the forkID intervals in memory
+func (s *State) UpdateForkIDIntervalsInMemory(intervals []ForkIDInterval) {
+	s.storage.UpdateForkIDIntervalsInMemory(intervals)
+}
+
+// AddForkIDInterval updates the forkID intervals
+func (s *State) AddForkIDInterval(ctx context.Context, newForkID ForkIDInterval, dbTx pgx.Tx) error {
+	return s.storage.AddForkIDInterval(ctx, newForkID, dbTx)
 }
 
 // GetForkIDByBatchNumber returns the fork id for a given batch number
 func (s *State) GetForkIDByBatchNumber(batchNumber uint64) uint64 {
-	// If NumBatchForkIdUpgrade is defined (!=0) we are performing forkid upgrade process
-	// In this case, if the batchNumber is the next to the NumBatchForkIdUpgrade, we need to return the
-	// new "future" forkId (ForkUpgradeNewForkId)
-	if (s.cfg.ForkUpgradeBatchNumber) != 0 && (batchNumber > s.cfg.ForkUpgradeBatchNumber) {
-		return s.cfg.ForkUpgradeNewForkId
-	}
+	return s.storage.GetForkIDByBatchNumber(batchNumber)
+}
 
-	for _, interval := range s.cfg.ForkIDIntervals {
-		if batchNumber >= interval.FromBatchNumber && batchNumber <= interval.ToBatchNumber {
-			return interval.ForkId
-		}
-	}
-
-	// If not found return the last fork id
-	return s.cfg.ForkIDIntervals[len(s.cfg.ForkIDIntervals)-1].ForkId
+// GetForkIDByBlockNumber returns the fork id for a given block number
+func (s *State) GetForkIDByBlockNumber(blockNumber uint64) uint64 {
+	return s.storage.GetForkIDByBlockNumber(blockNumber)
 }

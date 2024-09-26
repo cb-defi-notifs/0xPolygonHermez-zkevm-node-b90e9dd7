@@ -11,86 +11,77 @@ import (
 	"github.com/0xPolygonHermez/zkevm-node/hex"
 	"github.com/0xPolygonHermez/zkevm-node/log"
 	"github.com/0xPolygonHermez/zkevm-node/state/runtime/executor"
-	"github.com/0xPolygonHermez/zkevm-node/state/runtime/executor/pb"
 	"github.com/0xPolygonHermez/zkevm-node/state/runtime/fakevm"
 	"github.com/0xPolygonHermez/zkevm-node/state/runtime/instrumentation"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
-// ConvertToCounters extracts ZKCounters from a ProcessBatchResponse
-func ConvertToCounters(resp *pb.ProcessBatchResponse) ZKCounters {
-	return ZKCounters{
-		CumulativeGasUsed:    resp.CumulativeGasUsed,
-		UsedKeccakHashes:     resp.CntKeccakHashes,
-		UsedPoseidonHashes:   resp.CntPoseidonHashes,
-		UsedPoseidonPaddings: resp.CntPoseidonPaddings,
-		UsedMemAligns:        resp.CntMemAligns,
-		UsedArithmetics:      resp.CntArithmetics,
-		UsedBinaries:         resp.CntBinaries,
-		UsedSteps:            resp.CntSteps,
-	}
-}
+const (
+	// MaxTxGasLimit is the gas limit allowed per tx in a batch
+	MaxTxGasLimit = uint64(30000000)
+)
 
 // TestConvertToProcessBatchResponse for test purposes
-func (s *State) TestConvertToProcessBatchResponse(txs []types.Transaction, response *pb.ProcessBatchResponse) (*ProcessBatchResponse, error) {
-	return s.convertToProcessBatchResponse(txs, response)
+func (s *State) TestConvertToProcessBatchResponse(batchResponse *executor.ProcessBatchResponse) (*ProcessBatchResponse, error) {
+	return s.convertToProcessBatchResponse(batchResponse)
 }
 
-func (s *State) convertToProcessBatchResponse(txs []types.Transaction, response *pb.ProcessBatchResponse) (*ProcessBatchResponse, error) {
-	responses, err := s.convertToProcessTransactionResponse(txs, response.Responses)
+func (s *State) convertToProcessBatchResponse(batchResponse *executor.ProcessBatchResponse) (*ProcessBatchResponse, error) {
+	blockResponses, err := s.convertToProcessBlockResponse(batchResponse.Responses)
 	if err != nil {
 		return nil, err
 	}
 
-	readWriteAddresses, err := convertToReadWriteAddresses(response.ReadWriteAddresses)
+	readWriteAddresses, err := convertToReadWriteAddresses(batchResponse.ReadWriteAddresses)
 	if err != nil {
 		return nil, err
 	}
 
-	isExecutorLevelError := (response.Error != executor.EXECUTOR_ERROR_NO_ERROR)
+	isExecutorLevelError := (batchResponse.Error != executor.ExecutorError_EXECUTOR_ERROR_NO_ERROR)
 	isRomLevelError := false
 	isRomOOCError := false
 
-	if response.Responses != nil {
-		for _, resp := range response.Responses {
-			if resp.Error != pb.RomError_ROM_ERROR_NO_ERROR {
+	if batchResponse.Responses != nil {
+		for _, resp := range batchResponse.Responses {
+			if resp.Error != executor.RomError_ROM_ERROR_NO_ERROR {
 				isRomLevelError = true
 				break
 			}
 		}
 
-		if len(response.Responses) > 0 {
+		if len(batchResponse.Responses) > 0 {
 			// Check out of counters
-			errorToCheck := response.Responses[len(response.Responses)-1].Error
+			errorToCheck := batchResponse.Responses[len(batchResponse.Responses)-1].Error
 			isRomOOCError = executor.IsROMOutOfCountersError(errorToCheck)
 		}
 	}
 
 	return &ProcessBatchResponse{
-		NewStateRoot:         common.BytesToHash(response.NewStateRoot),
-		NewAccInputHash:      common.BytesToHash(response.NewAccInputHash),
-		NewLocalExitRoot:     common.BytesToHash(response.NewLocalExitRoot),
-		NewBatchNumber:       response.NewBatchNum,
-		UsedZkCounters:       convertToCounters(response),
-		Responses:            responses,
-		ExecutorError:        executor.ExecutorErr(response.Error),
+		NewStateRoot:         common.BytesToHash(batchResponse.NewStateRoot),
+		NewAccInputHash:      common.BytesToHash(batchResponse.NewAccInputHash),
+		NewLocalExitRoot:     common.BytesToHash(batchResponse.NewLocalExitRoot),
+		NewBatchNumber:       batchResponse.NewBatchNum,
+		UsedZkCounters:       convertToCounters(batchResponse),
+		BlockResponses:       blockResponses,
+		ExecutorError:        executor.ExecutorErr(batchResponse.Error),
 		ReadWriteAddresses:   readWriteAddresses,
-		FlushID:              response.FlushId,
-		StoredFlushID:        response.StoredFlushId,
-		ProverID:             response.ProverId,
+		FlushID:              batchResponse.FlushId,
+		StoredFlushID:        batchResponse.StoredFlushId,
+		ProverID:             batchResponse.ProverId,
 		IsExecutorLevelError: isExecutorLevelError,
 		IsRomLevelError:      isRomLevelError,
 		IsRomOOCError:        isRomOOCError,
+		ForkID:               batchResponse.ForkId,
 	}, nil
 }
 
 // IsStateRootChanged returns true if the transaction changes the state root
-func IsStateRootChanged(err pb.RomError) bool {
-	return !executor.IsIntrinsicError(err) && !executor.IsROMOutOfCountersError(err)
+func IsStateRootChanged(err executor.RomError) bool {
+	return !executor.IsIntrinsicError(err) && !executor.IsROMOutOfCountersError(err) && err != executor.RomError_ROM_ERROR_INVALID_RLP
 }
 
-func convertToReadWriteAddresses(addresses map[string]*pb.InfoReadWrite) (map[common.Address]*InfoReadWrite, error) {
+func convertToReadWriteAddresses(addresses map[string]*executor.InfoReadWrite) (map[common.Address]*InfoReadWrite, error) {
 	results := make(map[common.Address]*InfoReadWrite, len(addresses))
 
 	for addr, addrInfo := range addresses {
@@ -124,73 +115,85 @@ func convertToReadWriteAddresses(addresses map[string]*pb.InfoReadWrite) (map[co
 	return results, nil
 }
 
-func (s *State) convertToProcessTransactionResponse(txs []types.Transaction, responses []*pb.ProcessTransactionResponse) ([]*ProcessTransactionResponse, error) {
-	results := make([]*ProcessTransactionResponse, 0, len(responses))
-	for i, response := range responses {
-		trace, err := convertToStructLogArray(response.ExecutionTrace)
+func (s *State) convertToProcessBlockResponse(responses []*executor.ProcessTransactionResponse) ([]*ProcessBlockResponse, error) {
+	results := make([]*ProcessBlockResponse, 0, len(responses))
+	for _, response := range responses {
+		blockResponse := new(ProcessBlockResponse)
+		blockResponse.TransactionResponses = make([]*ProcessTransactionResponse, 0, 1)
+		txResponse := new(ProcessTransactionResponse)
+		txResponse.TxHash = common.BytesToHash(response.TxHash)
+		txResponse.Type = response.Type
+		txResponse.ReturnValue = response.ReturnValue
+		txResponse.GasLeft = response.GasLeft
+		txResponse.GasUsed = response.GasUsed
+		txResponse.GasRefunded = response.GasRefunded
+		txResponse.RomError = executor.RomErr(response.Error)
+		txResponse.CreateAddress = common.HexToAddress(response.CreateAddress)
+		txResponse.StateRoot = common.BytesToHash(response.StateRoot)
+		txResponse.Logs = convertToLog(response.Logs)
+		txResponse.ChangesStateRoot = IsStateRootChanged(response.Error)
+		fullTrace, err := convertToFullTrace(response.FullTrace)
 		if err != nil {
 			return nil, err
 		}
+		txResponse.FullTrace = *fullTrace
+		txResponse.EffectiveGasPrice = response.EffectiveGasPrice
+		txResponse.EffectivePercentage = response.EffectivePercentage
+		txResponse.HasGaspriceOpcode = (response.HasGaspriceOpcode == 1)
+		txResponse.HasBalanceOpcode = (response.HasBalanceOpcode == 1)
 
-		result := new(ProcessTransactionResponse)
-		result.TxHash = common.BytesToHash(response.TxHash)
-		result.Type = response.Type
-		result.ReturnValue = response.ReturnValue
-		result.GasLeft = response.GasLeft
-		result.GasUsed = response.GasUsed
-		result.GasRefunded = response.GasRefunded
-		result.RomError = executor.RomErr(response.Error)
-		result.CreateAddress = common.HexToAddress(response.CreateAddress)
-		result.StateRoot = common.BytesToHash(response.StateRoot)
-		result.Logs = convertToLog(response.Logs)
-		result.ChangesStateRoot = IsStateRootChanged(response.Error)
-		result.ExecutionTrace = *trace
-		callTrace, err := convertToExecutorTrace(response.CallTrace)
-		if err != nil {
-			return nil, err
-		}
-		result.CallTrace = *callTrace
-		result.EffectiveGasPrice = response.EffectiveGasPrice
-		result.EffectivePercentage = response.EffectivePercentage
-		result.Tx = txs[i]
+		tx := new(types.Transaction)
 
-		_, err = DecodeTx(common.Bytes2Hex(response.GetRlpTx()))
-		if err != nil {
-			timestamp := time.Now()
-			log.Errorf("error decoding rlp returned by executor %v at %v", err, timestamp)
-
-			event := &event.Event{
-				ReceivedAt: timestamp,
-				Source:     event.Source_Node,
-				Level:      event.Level_Error,
-				EventID:    event.EventID_ExecutorRLPError,
-				Json:       string(response.GetRlpTx()),
-			}
-
-			err = s.eventLog.LogEvent(context.Background(), event)
+		if response.Error != executor.RomError_ROM_ERROR_INVALID_RLP && len(response.GetRlpTx()) > 0 {
+			tx, err = DecodeTx(common.Bytes2Hex(response.GetRlpTx()))
 			if err != nil {
-				log.Errorf("error storing payload: %v", err)
+				timestamp := time.Now()
+				log.Errorf("error decoding rlp returned by executor %v at %v", err, timestamp)
+
+				event := &event.Event{
+					ReceivedAt: timestamp,
+					Source:     event.Source_Node,
+					Level:      event.Level_Error,
+					EventID:    event.EventID_ExecutorRLPError,
+					Json:       string(response.GetRlpTx()),
+				}
+
+				eventErr := s.eventLog.LogEvent(context.Background(), event)
+				if eventErr != nil {
+					log.Errorf("error storing payload: %v", err)
+				}
+
+				return nil, err
 			}
+		} else {
+			log.Warnf("ROM_ERROR_INVALID_RLP returned by the executor")
 		}
 
-		results = append(results, result)
+		if tx != nil {
+			txResponse.Tx = *tx
+			log.Debugf("ProcessTransactionResponse[TxHash]: %v", txResponse.TxHash)
+			if response.Error == executor.RomError_ROM_ERROR_NO_ERROR {
+				log.Debugf("ProcessTransactionResponse[Nonce]: %v", txResponse.Tx.Nonce())
+			}
+			log.Debugf("ProcessTransactionResponse[StateRoot]: %v", txResponse.StateRoot.String())
+			log.Debugf("ProcessTransactionResponse[Error]: %v", txResponse.RomError)
+			log.Debugf("ProcessTransactionResponse[GasUsed]: %v", txResponse.GasUsed)
+			log.Debugf("ProcessTransactionResponse[GasLeft]: %v", txResponse.GasLeft)
+			log.Debugf("ProcessTransactionResponse[GasRefunded]: %v", txResponse.GasRefunded)
+			log.Debugf("ProcessTransactionResponse[ChangesStateRoot]: %v", txResponse.ChangesStateRoot)
+			log.Debugf("ProcessTransactionResponse[EffectiveGasPrice]: %v", txResponse.EffectiveGasPrice)
+			log.Debugf("ProcessTransactionResponse[EffectivePercentage]: %v", txResponse.EffectivePercentage)
+		}
 
-		log.Debugf("ProcessTransactionResponse[TxHash]: %v", result.TxHash)
-		log.Debugf("ProcessTransactionResponse[Nonce]: %v", result.Tx.Nonce())
-		log.Debugf("ProcessTransactionResponse[StateRoot]: %v", result.StateRoot.String())
-		log.Debugf("ProcessTransactionResponse[Error]: %v", result.RomError)
-		log.Debugf("ProcessTransactionResponse[GasUsed]: %v", result.GasUsed)
-		log.Debugf("ProcessTransactionResponse[GasLeft]: %v", result.GasLeft)
-		log.Debugf("ProcessTransactionResponse[GasRefunded]: %v", result.GasRefunded)
-		log.Debugf("ProcessTransactionResponse[ChangesStateRoot]: %v", result.ChangesStateRoot)
-		log.Debugf("ProcessTransactionResponse[EffectiveGasPrice]: %v", result.EffectiveGasPrice)
-		log.Debugf("ProcessTransactionResponse[EffectivePercentage]: %v", result.EffectivePercentage)
+		blockResponse.TransactionResponses = append(blockResponse.TransactionResponses, txResponse)
+		blockResponse.GasLimit = MaxTxGasLimit
+		results = append(results, blockResponse)
 	}
 
 	return results, nil
 }
 
-func convertToLog(protoLogs []*pb.Log) []*types.Log {
+func convertToLog(protoLogs []*executor.Log) []*types.Log {
 	logs := make([]*types.Log, 0, len(protoLogs))
 
 	for _, protoLog := range protoLogs {
@@ -198,10 +201,8 @@ func convertToLog(protoLogs []*pb.Log) []*types.Log {
 		log.Address = common.HexToAddress(protoLog.Address)
 		log.Topics = convertToTopics(protoLog.Topics)
 		log.Data = protoLog.Data
-		log.BlockNumber = protoLog.BatchNumber
 		log.TxHash = common.BytesToHash(protoLog.TxHash)
 		log.TxIndex = uint(protoLog.TxIndex)
-		log.BlockHash = common.BytesToHash(protoLog.BatchHash)
 		log.Index = uint(protoLog.Index)
 		logs = append(logs, log)
 	}
@@ -218,64 +219,11 @@ func convertToTopics(responses [][]byte) []common.Hash {
 	return results
 }
 
-func convertToStructLogArray(responses []*pb.ExecutionTraceStep) (*[]instrumentation.StructLog, error) {
-	results := make([]instrumentation.StructLog, 0, len(responses))
-
-	for _, response := range responses {
-		convertedStack, err := convertToBigIntArray(response.Stack)
-		if err != nil {
-			return nil, err
-		}
-		result := new(instrumentation.StructLog)
-		result.Pc = response.Pc
-		result.Op = response.Op
-		result.Gas = response.RemainingGas
-		result.GasCost = response.GasCost
-		result.Memory = response.Memory
-		result.MemorySize = int(response.MemorySize)
-		result.MemoryOffset = int(response.MemoryOffset)
-		result.Stack = convertedStack
-		result.ReturnData = response.ReturnData
-		result.Storage = convertToProperMap(response.Storage)
-		result.Depth = int(response.Depth)
-		result.RefundCounter = response.GasRefund
-		result.Err = executor.RomErr(response.Error)
-
-		results = append(results, *result)
-	}
-	return &results, nil
-}
-
-func convertToBigIntArray(responses []string) ([]*big.Int, error) {
-	results := make([]*big.Int, 0, len(responses))
-
-	for _, response := range responses {
-		if len(response)%2 != 0 {
-			response = "0" + response
-		}
-		result, ok := new(big.Int).SetString(response, hex.Base)
-		if ok {
-			results = append(results, result)
-		} else {
-			return nil, fmt.Errorf("string %s is not valid", response)
-		}
-	}
-	return results, nil
-}
-
-func convertToProperMap(responses map[string]string) map[common.Hash]common.Hash {
-	results := make(map[common.Hash]common.Hash, len(responses))
-	for key, response := range responses {
-		results[common.HexToHash(key)] = common.HexToHash(response)
-	}
-	return results
-}
-
-func convertToExecutorTrace(callTrace *pb.CallTrace) (*instrumentation.ExecutorTrace, error) {
-	trace := new(instrumentation.ExecutorTrace)
-	if callTrace != nil {
-		trace.Context = convertToContext(callTrace.Context)
-		steps, err := convertToInstrumentationSteps(callTrace.Steps)
+func convertToFullTrace(fullTrace *executor.FullTrace) (*instrumentation.FullTrace, error) {
+	trace := new(instrumentation.FullTrace)
+	if fullTrace != nil {
+		trace.Context = convertToContext(fullTrace.Context)
+		steps, err := convertToInstrumentationSteps(fullTrace.Steps)
 		if err != nil {
 			return nil, err
 		}
@@ -285,7 +233,7 @@ func convertToExecutorTrace(callTrace *pb.CallTrace) (*instrumentation.ExecutorT
 	return trace, nil
 }
 
-func convertToContext(context *pb.TransactionContext) instrumentation.Context {
+func convertToContext(context *executor.TransactionContext) instrumentation.Context {
 	return instrumentation.Context{
 		Type:         context.Type,
 		From:         context.From,
@@ -301,7 +249,7 @@ func convertToContext(context *pb.TransactionContext) instrumentation.Context {
 	}
 }
 
-func convertToInstrumentationSteps(responses []*pb.TransactionStep) ([]instrumentation.Step, error) {
+func convertToInstrumentationSteps(responses []*executor.TransactionStep) ([]instrumentation.Step, error) {
 	results := make([]instrumentation.Step, 0, len(responses))
 	for _, response := range responses {
 		step := new(instrumentation.Step)
@@ -310,7 +258,7 @@ func convertToInstrumentationSteps(responses []*pb.TransactionStep) ([]instrumen
 		step.Pc = response.Pc
 		step.Gas = response.Gas
 		step.OpCode = fakevm.OpCode(response.Op).String()
-		step.Refund = fmt.Sprint(response.GasRefund)
+		step.Refund = response.GasRefund
 		step.Op = uint64(response.Op)
 		err := executor.RomErr(response.Error)
 		if err != nil {
@@ -336,12 +284,18 @@ func convertToInstrumentationSteps(responses []*pb.TransactionStep) ([]instrumen
 		copy(step.Memory, response.Memory)
 		step.ReturnData = make([]byte, len(response.ReturnData))
 		copy(step.ReturnData, response.ReturnData)
+		step.Storage = make(map[common.Hash]common.Hash, len(response.Storage))
+		for k, v := range response.Storage {
+			addr := common.BytesToHash(hex.DecodeBig(k).Bytes())
+			value := common.BytesToHash(hex.DecodeBig(v).Bytes())
+			step.Storage[addr] = value
+		}
 		results = append(results, *step)
 	}
 	return results, nil
 }
 
-func convertToInstrumentationContract(response *pb.Contract) instrumentation.Contract {
+func convertToInstrumentationContract(response *executor.Contract) instrumentation.Contract {
 	return instrumentation.Contract{
 		Address: common.HexToAddress(response.Address),
 		Caller:  common.HexToAddress(response.Caller),
@@ -351,15 +305,15 @@ func convertToInstrumentationContract(response *pb.Contract) instrumentation.Con
 	}
 }
 
-func convertToCounters(resp *pb.ProcessBatchResponse) ZKCounters {
+func convertToCounters(resp *executor.ProcessBatchResponse) ZKCounters {
 	return ZKCounters{
-		CumulativeGasUsed:    resp.CumulativeGasUsed,
-		UsedKeccakHashes:     resp.CntKeccakHashes,
-		UsedPoseidonHashes:   resp.CntPoseidonHashes,
-		UsedPoseidonPaddings: resp.CntPoseidonPaddings,
-		UsedMemAligns:        resp.CntMemAligns,
-		UsedArithmetics:      resp.CntArithmetics,
-		UsedBinaries:         resp.CntBinaries,
-		UsedSteps:            resp.CntSteps,
+		GasUsed:          resp.CumulativeGasUsed,
+		KeccakHashes:     resp.CntKeccakHashes,
+		PoseidonHashes:   resp.CntPoseidonHashes,
+		PoseidonPaddings: resp.CntPoseidonPaddings,
+		MemAligns:        resp.CntMemAligns,
+		Arithmetics:      resp.CntArithmetics,
+		Binaries:         resp.CntBinaries,
+		Steps:            resp.CntSteps,
 	}
 }
